@@ -21,7 +21,7 @@ from .config import SERVICE_DIRS, load_rules
 from .extract import extract_cached
 from .score import Decision
 from .sorter import PLACE_RU
-from .viewport import Box, Viewport
+from .viewport import Viewport
 
 VIEW = (940, 500)          # размер большой картинки
 STRIP_H = 90               # высота полосы с плашкой действия
@@ -33,9 +33,7 @@ def _zone_strip(im: Image.Image, facts: dict) -> Image.Image | None:
     box = facts.get("viewport_box")
     if not box:
         return None
-    vp = Viewport(box=Box(*box), scale=1.0, logo=Box(0, 0, 1, 1),
-                  frame_w=facts.get("frame_w") or im.width,
-                  frame_h=facts.get("frame_h") or im.height)
+    vp = Viewport.from_box(box, facts.get("frame_w") or im.width, facts.get("frame_h") or im.height)
     crop = vp.zone_toasts.crop(im)
     if crop.width < 10 or crop.height < 10:
         return None

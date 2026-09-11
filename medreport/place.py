@@ -313,10 +313,8 @@ def wall_feature(path: Path, viewport_box: list[int] | None, frame: tuple[int, i
     hit = ocr.cache().get(key)
     if hit is not None:
         return hit if hit is None else float(hit)
-    from .viewport import Box, Viewport
-    x0, y0, x1, y1 = viewport_box
-    vp = Viewport(box=Box(x0, y0, x1, y1), scale=1.0, logo=Box(0, 0, 1, 1),
-                  frame_w=frame[0], frame_h=frame[1])
+    from .viewport import Viewport
+    vp = Viewport.from_box(viewport_box, frame[0], frame[1])
     im = Image.open(path)
     im.load()
     a = np.asarray(vp.zone_scene.crop(im).convert("RGB").resize((320, 192), Image.BILINEAR),

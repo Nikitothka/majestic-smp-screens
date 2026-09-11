@@ -38,9 +38,29 @@ _ID_LOOSE = re.compile(r"#\s?([0-9ЗзЭэОоOoQDбБGlI|і!ЧчASsЅgqZzBВTТ
 _NAME_TAIL = re.compile(r"((?:[А-ЯЁ][а-яё]+[\s-]+){0,2}[А-ЯЁ][а-яё]+)\s*[!.]?\s*$")
 
 
+#: номер, у которого OCR потерял решётку: «Вы вылечили -67225», «Вы вылечили 474313»
+_ID_BARE = re.compile(r"(?<![\w#.,:])([-—–№])?\s?(\d{3,7})(?![\d.,:])(?!\s*(?:₽|руб))")
+
+
+def bare_patient_id(text: str) -> str | None:
+    """Номер без решётки. На мелком экране «#» читается как «-», «4» или «5».
+
+    Дефис перед числом — это и есть решётка. Шесть цифр подряд без знака — тоже:
+    номера игроков пятизначные, и лишняя цифра впереди — прочитанная решётка
+    («#74313» → «474313»). Число покороче берём как есть: решётка просто пропала.
+    """
+    m = _ID_BARE.search(text)
+    if not m:
+        return None
+    num = m.group(2)
+    if not m.group(1) and len(num) == 6:
+        num = num[1:]
+    return num if len(num) <= 6 else None
+
+
 def find_patient(text: str) -> str | None:
     """Кого лечили: номер вида 12345 либо имя, если игра написала имя."""
-    pid = find_patient_id(text)
+    pid = find_patient_id(text) or bare_patient_id(text)
     if pid:
         return pid
     m = _NAME_TAIL.search(text.strip())
@@ -97,6 +117,7 @@ def norm(s: str) -> str:
     s = mask_names(s)
     s = s.lower().replace("ё", "е")
     s = ID_RE.sub("#{id}", s)
+    s = _ID_BARE.sub("#{id}", s)       # номер, у которого пропала решётка, — тоже номер
     s = re.sub(r"[^a-zа-я0-9#{}₽ ]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -215,8 +236,37 @@ class Facts:
         return asdict(self)
 
 
-def _rows(im, zone, key, upscale=1.5, min_conf=0.2):
-    return ocr.join_rows(ocr.read_zone(im, zone, key=key, upscale=upscale, min_conf=min_conf))
+def _rows(im, zone, key, upscale=1.5, min_conf=0.2, scale=1.0):
+    """Строки зоны. upscale задан для 4K; на меньшем экране текст мельче, и зона
+    растягивается сильнее, чтобы распознавание видело буквы того же размера."""
+    k = min(6.0, max(0.5, upscale / max(scale, 1e-3)))
+    return ocr.join_rows(ocr.read_zone(im, zone, key=key, upscale=k, min_conf=min_conf),
+                         row_tol=max(6, round(18 * scale)))
+
+
+def action_from_toasts(rows: list[str]) -> tuple[str | None, float, str | None, list[str]]:
+    """По строкам плашек — действие, уверенность, пациент и подтверждающие плашки."""
+    toast_pats = {k: v for k, v in _phr["toasts"].items() if v}
+    found: list[tuple[str, float, str]] = []          # (действие, точность, строка)
+    supporting: list[str] = []
+    for row in rows:
+        tag, score = best_match(row, toast_pats)
+        if score >= 0.72:
+            found.append((tag, round(score, 3), row))
+        ctag = match_contains(row, _phr.get("toasts_contains", {}))
+        if ctag:
+            found.append((ctag, 1.0, row))
+        stag, sscore = best_match(row, _phr["supporting"])
+        if sscore >= 0.72:
+            supporting.append(stag)
+    if not found:
+        return None, 0.0, None, supporting
+    # в кадре может висеть сразу несколько плашек: реанимация важнее отменённого вызова,
+    # иначе один и тот же кадр засчитался бы как более дешёвое действие
+    order = _phr.get("priority", [])
+    rank = {a: i for i, a in enumerate(order)}
+    tag, conf, row = min(found, key=lambda t: (rank.get(t[0], len(order)), -t[1]))
+    return tag, conf, find_patient(row), supporting
 
 
 def extract_cached(path: Path, *, want_chat: bool = False) -> dict:
@@ -260,32 +310,13 @@ def extract(path: Path, *, want_chat: bool = True) -> Facts:
     h = f.hash
 
     # --- тосты: действие + ID -------------------------------------------------
-    f.toasts = _rows(im, vp.zone_toasts, f"{h}:toasts", upscale=1.5)
-    toast_pats = {k: v for k, v in _phr["toasts"].items() if v}
-    found: list[tuple[str, float, str]] = []          # (действие, точность, строка)
-    for row in f.toasts:
-        tag, score = best_match(row, toast_pats)
-        if score >= 0.72:
-            found.append((tag, round(score, 3), row))
-        ctag = match_contains(row, _phr.get("toasts_contains", {}))
-        if ctag:
-            found.append((ctag, 1.0, row))
-        stag, sscore = best_match(row, _phr["supporting"])
-        if sscore >= 0.72:
-            f.supporting.append(stag)
-    if found:
-        # в кадре может висеть сразу несколько плашек: реанимация важнее отменённого вызова,
-        # иначе один и тот же кадр засчитался бы как более дешёвое действие
-        order = _phr.get("priority", [])
-        rank = {a: i for i, a in enumerate(order)}
-        tag, conf, row = min(found, key=lambda t: (rank.get(t[0], len(order)), -t[1]))
-        f.action, f.action_conf = tag, conf
-        f.patient_id = find_patient(row)
+    f.toasts = _rows(im, vp.zone_toasts, f"{h}:toasts", upscale=1.5, scale=vp.scale)
+    f.action, f.action_conf, f.patient_id, f.supporting = action_from_toasts(f.toasts)
     if f.action and f.patient_id is None and f.action != "call_cancelled":
         f.problems.append("действие есть, ID пациента не прочитан")
 
     # --- часы ---------------------------------------------------------------
-    f.clock_rows = _rows(im, vp.zone_clock, f"{h}:clock", upscale=2.0, min_conf=0.1)
+    f.clock_rows = _rows(im, vp.zone_clock, f"{h}:clock", upscale=2.0, min_conf=0.1, scale=vp.scale)
     gt, why = parse_clock(f.clock_rows)
     f.game_time = gt.isoformat(timespec="minutes") if gt else None
     if ft:
@@ -300,30 +331,30 @@ def extract(path: Path, *, want_chat: bool = True) -> Facts:
         f.problems.append(f"часы не прочитаны ({why.strip()}), взято время файла")
 
     # --- зона: безопасная / опасная ----------------------------------------------
-    sz = _rows(im, vp.zone_safezone, f"{h}:safe", upscale=2.0, min_conf=0.1)
+    sz = _rows(im, vp.zone_safezone, f"{h}:safe", upscale=2.0, min_conf=0.1, scale=vp.scale)
     f.zone_badge = zone_badge(sz)
     f.safe_zone = f.zone_badge == "safe"
 
     # --- миникарта: подписи ------------------------------------------------------
-    f.minimap_text = [r for r in _rows(im, vp.zone_minimap, f"{h}:map", upscale=2.0, min_conf=0.15)
+    f.minimap_text = [r for r in _rows(im, vp.zone_minimap, f"{h}:map", upscale=2.0, min_conf=0.15, scale=vp.scale)
                       if len(r) >= 2]
     f.map_place, f.map_place_hits = match_map_place(f.minimap_text)
 
     # --- правый верх: свой ID ------------------------------------------------------
-    tr = " ".join(_rows(im, vp.zone_topright, f"{h}:tr", upscale=2.0, min_conf=0.1))
+    tr = " ".join(_rows(im, vp.zone_topright, f"{h}:tr", upscale=2.0, min_conf=0.1, scale=vp.scale))
     m = re.search(r"ID[:\s]*(\d{2,5})", tr)
     if m:
         f.own_id = m.group(1)
 
     # --- чат и панель вызова (контекст) --------------------------------------------
     if want_chat:
-        f.chat_rows = merge_wrapped(_rows(im, vp.zone_chat, f"{h}:chat", upscale=1.0, min_conf=0.2))
+        f.chat_rows = merge_wrapped(_rows(im, vp.zone_chat, f"{h}:chat", upscale=1.0, min_conf=0.2, scale=vp.scale))
         for row in f.chat_rows:
             tag, score = best_match(row, _phr["chat"])
             if score >= 0.6:
                 f.chat_events.append({"tag": tag, "id": find_patient(row),
                                       "score": round(score, 2)})
-        cp = _rows(im, vp.zone_call_panel, f"{h}:call", upscale=1.5, min_conf=0.2)
+        cp = _rows(im, vp.zone_call_panel, f"{h}:call", upscale=1.5, min_conf=0.2, scale=vp.scale)
         if any(similarity(r, _phr["call_panel"]["header"]) >= 0.7 for r in cp):
             joined = " ".join(cp)
             cid = find_patient_id(joined)

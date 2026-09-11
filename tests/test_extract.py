@@ -5,7 +5,8 @@ from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from medreport.extract import parse_clock, filename_time, match_map_place, best_match, merge_wrapped, ID_RE
+from medreport.extract import (parse_clock, filename_time, match_map_place, best_match, merge_wrapped,
+                               find_patient, ID_RE)
 from medreport.config import load_phrases
 
 P = load_phrases()
@@ -52,6 +53,19 @@ def test_toast_fuzzy_match_and_id():
     assert ID_RE.search("Вы реанимировали #369").group(1) == "369"
     tag, score = best_match("Этот макрос уже проигрывается!", P["toasts"])
     assert score < 0.72, "служебная плашка не должна стать действием"
+
+
+def test_toast_with_lost_hash_on_small_screen():
+    """1366×768: решётка перед номером читается как «4», «5» или дефис (реальные строки OCR)."""
+    for row, pid in (("Вы вылечили 474313", "74313"), ("Вы вылечили 589371", "89371"),
+                     ("Вы вылечили -67225", "67225"), ("Вы вылечили 2431", "2431")):
+        tag, score = best_match(row, P["toasts"])
+        assert tag == "heal" and score >= 0.72, row
+        assert find_patient(row) == pid, row
+    assert find_patient("Вы реанимировали #89893") == "89893"
+    assert find_patient("Вы вылечили Федор Щукин") == "Федор Щукин"
+    # сумма награды — не действие, даже когда число превращается в «номер»
+    assert best_match("Вы получили 750 ₽ за спасение игрока", P["toasts"])[1] < 0.72
 
 
 def test_chat_hyphen_wrap_merge():
