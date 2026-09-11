@@ -19,6 +19,8 @@ HOSPITAL_LOOK_MIN = 0.60
 #: для «ПМП в больнице» нужна уверенная похожесть: ниже — магазины и тоннели,
 #: а между 0.60 и 0.66 решает человек
 HOSPITAL_PMP_MIN = 0.66
+#: эталоны решают, какая больница, только при таком перевесе одной над другой
+KNN_GAP_MIN = 0.10
 
 #: подпапки доп. баллов — по виду работы, без места и цены, чтобы не совпадать
 #: с основными категориями
@@ -122,11 +124,30 @@ def resolve_place(action: str, facts: dict, guess: PlaceGuess | None, rules: Rul
             return None, None, "", notes + [
                 "по цвету стен похоже на больницу, но интерьер незнакомый — "
                 "возможно, мед.отсек АСМП или другое помещение"]
-        if guess.label in HOSPITAL_LABELS and guess.label != wall_label and guess.confidence > 0.75:
-            notes.append(f"цвет стен говорит {wall_label}, эталоны интерьера — {guess.label}")
+        # спорить со сменой эталоны могут только при чётком перевесе одной больницы:
+        # без него они путают похожие кабинеты (см. KNN_GAP_MIN)
+        hs = facts.get("hosp_sims") or {}
+        if "gkb1" in hs and "gkb2" in hs:
+            knn_best = max(("gkb1", "gkb2"), key=lambda k: hs[k])
+            strong = abs(hs["gkb1"] - hs["gkb2"]) >= KNN_GAP_MIN
+        else:
+            knn_best, strong = guess.label, guess.confidence > 0.75
+        if knn_best in HOSPITAL_LABELS and knn_best != wall_label and strong:
+            notes.append(f"цвет стен говорит {wall_label}, эталоны интерьера — {knn_best}")
             return None, None, "", notes + ["признаки места разошлись"]
         return wall_label, True, "цвет стен и освещение", notes
 
+    # эталоны в одиночку: проверено на 112 кадрах с известной больницей — без условия
+    # правы в 87% случаев, при разрыве похожести между больницами ≥ 0.10 — во всех.
+    # Кабинеты и лаборатории в двух больницах похожи, поэтому без перевеса не угадываем.
+    hs = facts.get("hosp_sims") or {}
+    if "gkb1" in hs and "gkb2" in hs:
+        best = max(("gkb1", "gkb2"), key=lambda k: hs[k])
+        gap = abs(hs["gkb1"] - hs["gkb2"])
+        if gap >= KNN_GAP_MIN:
+            return best, True, "эталоны интерьера", notes
+        return None, None, "", notes + [
+            f"по интерьеру не отличить ГКБ 1 от Склифа (разрыв {gap:.2f}) — проверь"]
     if guess and guess.label in HOSPITAL_LABELS | {"asmp"}:
         return guess.label, guess.label in HOSPITAL_LABELS, "эталоны интерьера", notes
 

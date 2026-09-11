@@ -227,6 +227,7 @@ def analyse(sources: list[Path] | None = None, *, log=print, progress=None) -> l
                 if len(idx):
                     guess = idx.classify(v, min_conf=min_conf)
                     f["hospital_sim"] = round(idx.nearest_sim(v, place.HOSPITAL_LABELS), 4)
+                    f["hosp_sims"] = {h: round(idx.nearest_sim(v, {h}), 4) for h in ("gkb1", "gkb2")}
             except Exception as e:  # noqa: BLE001
                 f.setdefault("problems", []).append(f"место: {e!r}")
         wall = session_place.get(f.get("hash") or "", (None, 0.0))
@@ -337,6 +338,7 @@ def recheck_manual(dest: Path = DEFAULT_DEST, *, log=print) -> int:
                 ind = indoor.predict(v)
                 if len(idx):
                     f["hospital_sim"] = round(idx.nearest_sim(v, place.HOSPITAL_LABELS), 4)
+                    f["hosp_sims"] = {h: round(idx.nearest_sim(v, {h}), 4) for h in ("gkb1", "gkb2")}
                 if len(idx):
                     guess = idx.classify(v, min_conf=min_conf)
                 if a in HOSPITAL_ACTIONS:
@@ -764,6 +766,7 @@ def reclassify(dest: Path = DEFAULT_DEST, *, dry_run: bool = False, log=print) -
             if len(idx):
                 guess = idx.classify(v, min_conf=min_conf)
                 f["hospital_sim"] = round(idx.nearest_sim(v, place.HOSPITAL_LABELS), 4)
+                f["hosp_sims"] = {h: round(idx.nearest_sim(v, {h}), 4) for h in ("gkb1", "gkb2")}
         except Exception as e:  # noqa: BLE001
             log(f"  {src.name}: {e!r}")
             continue

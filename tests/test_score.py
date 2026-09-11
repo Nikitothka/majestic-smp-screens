@@ -319,3 +319,31 @@ def test_report_lists_lunch_screenshot_only_once():
     assert "Вакцина АСМП" not in text, "обеденная вакцина не должна стоять в основной категории"
     assert "Вакцины: 1 шт = 6 б." in text
     assert total == 9
+
+
+# ------------------ какая больница: эталоны решают только при уверенном перевесе
+# Проверено на 112 кадрах с известной больницей: в одиночку эталоны правы в 87%,
+# при разрыве похожести между больницами ≥ 0.10 — во всех. Кабинеты похожи.
+def _vax(hs):
+    f = facts(action="vaccinate", t="2026-09-10T13:07")
+    f["hosp_sims"] = hs
+    return decide(f, None, R, indoor=INSIDE)
+
+
+def test_interior_decides_hospital_only_with_clear_margin():
+    d = _vax({"gkb1": 0.82, "gkb2": 0.70})
+    assert d.category_id == "vax_gkb1" and d.place_source == "эталоны интерьера"
+
+
+def test_close_interiors_go_to_human_not_guessed():
+    # тот самый кабинет ГКБ 1 (10.09 13:07), который эталоны отнесли в Склиф
+    d = _vax({"gkb1": 0.716, "gkb2": 0.760})
+    assert d.bucket == "manual" and any("не отличить" in r for r in d.reasons)
+
+
+def test_session_colour_still_wins_over_close_interiors():
+    f = facts(action="vaccinate", t="2026-09-10T13:07")
+    f["hosp_sims"] = {"gkb1": 0.716, "gkb2": 0.760}
+    near = PlaceGuess("gkb2", 0.9, 0.76, {"gkb2": 1.0})
+    d = decide(f, near, R, indoor=INSIDE, wall=("gkb1", 0.04))
+    assert d.category_id == "vax_gkb1", "цвет регистратуры по смене важнее похожести кабинета"
