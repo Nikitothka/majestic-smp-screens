@@ -1,0 +1,122 @@
+# ============================================================
+#  БАЛЛОВАЯ СИСТЕМА — правится руками, код перечитывает файл при каждом запуске.
+# ============================================================
+
+# Временные окна по игровым часам (они же реальные). Формат [с, до), "до" не включается.
+times:
+  day:   ["10:00", "22:00"]
+  night: ["22:00", "10:00"]
+  lunch: ["14:00", "15:00"]
+
+# К чему применяется удвоение за обед. "all" — ко всей работе, либо список действий: [revive]
+lunch_applies_to: all
+
+# Насколько точно нужно знать место для каждого действия.
+#   none          — место не нужно вовсе
+#   hospital      — только «в больнице / не в больнице»
+#   exact         — какая именно: gkb1 / gkb2 / asmp
+actions:
+  revive:         { title: "реанимация",       place: hospital }
+  heal:           { title: "таблетка",         place: exact }
+  vaccinate:      { title: "вакцина",          place: exact }
+  certificate:    { title: "медсправка",       place: exact }
+  call_cancelled: { title: "отменённый вызов", place: none }
+
+# Названия мест (для папок и отчёта).
+# ВАЖНО: в игре ровно две больницы — «1 Больница» (у Павелецкой/ТЭЦ) и «2 Больница» (у ЦУМ/Кремля).
+# Здесь принято, что 1 Больница = ГКБ 1, 2 Больница = ГКБ 2 «Склиф» из балловой таблицы.
+# Если во фракции нумерация наоборот — поменять местами баллы в категориях ниже.
+places:
+  gkb1:   "ГКБ 1"
+  gkb2:   "ГКБ 2 Склиф"
+  asmp:   "АСМП"
+  street: "улица"
+
+# Категории. Проверяются сверху вниз, первая подошедшая побеждает.
+#   match.action      — действие
+#   match.in_hospital — true/false (для place: hospital)
+#   match.place       — gkb1/gkb2/asmp (для place: exact)
+#   match.daypart     — day/night
+categories:
+  - id: pmp_day
+    folder: "ПМП день (3 балла)"
+    points: 3
+    match: { action: revive, place: street, daypart: day }
+  - id: pmp_night
+    folder: "ПМП ночь (5 баллов)"
+    points: 5
+    match: { action: revive, place: street, daypart: night }
+  - id: pmp_hospital
+    folder: "ПМП в больнице (1 балл)"
+    points: 1
+    match: { action: revive, place: hospital }
+
+  - id: call_cancelled
+    folder: "Отменённый вызов (1 балл)"
+    points: 1
+    match: { action: call_cancelled }
+
+  - id: pill_gkb1
+    folder: "Таблетка ГКБ 1 (1 балл)"
+    points: 1
+    match: { action: heal, place: gkb1 }
+  - id: pill_gkb2
+    folder: "Таблетка ГКБ 2 Склиф (2 балла)"
+    points: 2
+    match: { action: heal, place: gkb2 }
+  - id: pill_asmp
+    folder: "Таблетка АСМП (2 балла)"
+    points: 2
+    match: { action: heal, place: asmp }
+
+  - id: vax_gkb1
+    folder: "Вакцина ГКБ 1 (3 балла)"
+    points: 3
+    match: { action: vaccinate, place: gkb1 }
+  - id: vax_gkb2
+    folder: "Вакцина ГКБ 2 Склиф (2 балла)"
+    points: 2
+    match: { action: vaccinate, place: gkb2 }
+  - id: vax_asmp
+    folder: "Вакцина АСМП (3 балла)"
+    points: 3
+    match: { action: vaccinate, place: asmp }
+
+  - id: cert_gkb2
+    folder: "Медсправка ГКБ 2 Склиф (2 балла)"
+    points: 2
+    match: { action: certificate, place: gkb2 }
+
+# Папка для работы в обед. Внутри создаются те же категории.
+lunch_folder: "Доп. баллы (обед 14-15)"
+
+# Замены (справочно, для калькулятора). Применяются только в одну сторону, максимум 50%.
+substitutions:
+  - { give: 1, give_what: vaccinate, get: 1, get_what: revive,    points: 3, limit_of: revive }
+  - { give: 5, give_what: revive,    get: 1, get_what: vaccinate, points: 3, limit_of: vaccinate }
+  - { give: 4, give_what: certificate, get: 1, get_what: vaccinate, points: 3, limit_of: vaccinate }
+  - { give: 2, give_what: certificate, get: 1, get_what: revive,  points: 3, limit_of: revive }
+  - { give: 5, give_what: heal,      get: 1, get_what: revive,    points: 3, limit_of: revive }
+
+# ============================================================
+#  ПОВЫШЕНИЕ. Нормативы фракции. Меняешь target — меняется расчёт в отчёте.
+#  ВАЖНО: «ПМП в больнице» в норматив по ПМП не идёт (так написано в правилах),
+#  поэтому в promotion_counts его нет.
+# ============================================================
+promotions:
+  target: ""             # цель у каждого своя — выбирается в окне программы
+
+  # Сколько держать СВЕРХ норматива про запас: если проверяющий забракует один кадр,
+  # отчёт не развалится. На дыры в отчёте не влияет, только на предлагаемые замены.
+  spare:
+    vaccines: 1
+
+  counts:                # какие категории идут в какой норматив
+    pmp:      [pmp_day, pmp_night]
+    vaccines: [vax_gkb1, vax_gkb2, vax_asmp]
+
+  ranks:
+    "5-6": { pmp: 60,  vaccines: 15, points: 300, exam: "Особо опасные инфекции" }
+    "6-7": { pmp: 70,  vaccines: 20, points: 400, exam: "Реаниматология для сотрудников СМП" }
+    "7-8": { pmp: 80,  vaccines: 25, points: 500, exam: "" }
+    "8-9": { pmp: 100, vaccines: 30, points: 600, exam: "Травматология" }

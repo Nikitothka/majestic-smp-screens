@@ -1,0 +1,8 @@
+# Распознавание текста и сцены. torch ставится отдельно в install.bat —
+# под процессор или под видеокарту NVIDIA.
+easyocr>=1.7.2
+numpy>=1.26
+scipy>=1.11
+Pillow>=10.0
+openpyxl>=3.1
+PyYAML>=6.0
