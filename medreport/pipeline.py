@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections import Counter
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +17,7 @@ from . import applog, ocr, place, periods, sorter, report, scan as scanmod
 from .config import (DEFAULT_DEST, DEFAULT_SOURCES, DATA_DIR, IMAGE_SUFFIXES, PKG_DIR,
                      SERVICE_DIRS, load_rules)
 from .extract import extract, extract_cached
-from .score import decide, Decision
+from .score import decide, Decision, LUNCH_SUBFOLDER
 
 JOURNAL_NAME = "journal.jsonl"
 
@@ -617,8 +619,10 @@ def audit(dest: Path = DEFAULT_DEST, *, fix: bool = False, log=print) -> dict:
             if rec.get("dst"):
                 known[str(Path(rec["dst"]))] = rec
 
-    # в дубликатах и оригиналах копии лежат законно — они не «лишние» и не «дубли»
-    service = {SERVICE_DIRS["report"], SERVICE_DIRS["duplicates"], SERVICE_DIRS["originals"]}
+    # в дубликатах, оригиналах и папке недели копии лежат законно — они не «лишние»
+    # и не «дубли»: папка недели вся собрана ссылками на уже разобранные кадры
+    service = {SERVICE_DIRS["report"], SERVICE_DIRS["duplicates"], SERVICE_DIRS["originals"],
+               SERVICE_DIRS["weekly"]}
     on_disk = [p for p in dest.rglob("*")
                if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
                and not any(part in service for part in p.relative_to(dest).parts)]
@@ -863,6 +867,117 @@ def rebuild_report(dest: Path = DEFAULT_DEST, *, log=print) -> None:
     log("отчёты пересобраны: " + ", ".join(p.name for p in paths.values()))
 
 
+def week_bounds(when=None):
+    """Понедельник и воскресенье недели, в которую попадает дата. Неделя во фракции — пн–вс."""
+    if when is None:
+        d = datetime.now().date()
+    elif isinstance(when, str):
+        d = datetime.fromisoformat(when.replace(" ", "T")).date()
+    elif isinstance(when, datetime):
+        d = when.date()
+    else:
+        d = when
+    monday = d.fromordinal(d.toordinal() - d.weekday())
+    return monday, monday.fromordinal(monday.toordinal() + 6)
+
+
+def _weekly_folder_of(rec: dict, facts: dict, rules) -> str | None:
+    """Папка категории для недельного отчёта — заново, а не из журнала.
+
+    Два соображения. Кадр, отданный в замену, в недельном считается по своей исходной
+    цене, значит и лежать должен в исходной категории, а не в «Заменах»: недельный —
+    про сделанную работу, а не про то, чем её потом закрыли. И подпапки обеда называются
+    по виду работы («Вакцины в обед»), а не по категории: у старых кадров в журнале
+    остались прежние имена, совпадающие с основными категориями, а проверяющий за такое
+    совпадение однажды уже вернул отчёт.
+    """
+    folder = (rec.get("folder") or "").replace("\\", "/")
+    swap = SERVICE_DIRS["swaps"] in folder.split("/")
+    cat_id = rec.get("orig_category_id") if swap else rec.get("category_id")
+    lunch = bool(rec.get("lunch")) or rules.raw["lunch_folder"] in folder.split("/")
+    if lunch:
+        action = facts.get("action")
+        sub = LUNCH_SUBFOLDER.get(action)
+        return f"{rules.raw['lunch_folder']}/{sub}" if sub else None
+    cat = next((c for c in rules.categories if c["id"] == cat_id), None) if cat_id else None
+    if cat is not None:
+        return cat["folder"]
+    return None if swap else (folder or None)
+
+
+def week_folder(dest: Path = DEFAULT_DEST, when=None, *, log=print) -> dict:
+    """Собрать всю неделю в одну папку — её и выгружают под недельный отчёт.
+
+    Кадры недели разложены по папкам периодов: часть уже сдана отдельным отчётом на
+    повышение, часть нет. Недельный отчёт считает неделю целиком, поэтому здесь они
+    сходятся вместе, по тем же категориям.
+
+    Файлы не копируются, а связываются с оригиналом (жёсткая ссылка): на диске они
+    занимают то же место, и правка одного — это правка обоих. Если файловая система
+    ссылки не умеет, делается обычная копия. Папка собирается заново при каждом вызове.
+    """
+    applog.banner("ПАПКА НЕДЕЛИ")
+    log = applog.tee(log)
+    rules = load_rules()
+    a, b = week_bounds(when)
+    root = dest / SERVICE_DIRS["weekly"] / f"неделя {a:%d.%m}-{b:%d.%m}"
+    journal = dest / SERVICE_DIRS["report"] / JOURNAL_NAME
+    if not journal.exists():
+        log("журнала нет — собирать нечего")
+        return {"folder": str(root), "files": 0, "points": 0, "categories": {}}
+
+    by_dst: dict[str, dict] = {}
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("dst"):
+            by_dst[rec["dst"]] = rec
+
+    if root.exists():
+        shutil.rmtree(root)
+    cats: Counter = Counter()
+    points = 0
+    copied = 0
+    for dst, rec in by_dst.items():
+        src = Path(dst)
+        if rec.get("kind") != "category" or not src.exists():
+            continue
+        card = scanmod.SCAN_DIR / f"{rec.get('hash')}.json"
+        if not card.exists():
+            continue
+        f = json.loads(card.read_text(encoding="utf-8"))
+        t = f.get("time")
+        if not t:
+            continue
+        d = datetime.fromisoformat(t.replace(" ", "T")).date()
+        if not (a <= d <= b):
+            continue
+        folder = _weekly_folder_of(rec, f, rules)
+        if folder is None:
+            continue
+        out = root / folder / src.name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, out)
+        except (OSError, NotImplementedError):
+            shutil.copy2(src, out)
+        cats[folder] += 1
+        points += rec.get("orig_points") or rec.get("points") or 0
+        copied += 1
+
+    week_txt = dest / SERVICE_DIRS["report"] / f"неделя {a:%d.%m}-{b:%d.%m}.txt"
+    if week_txt.exists():
+        shutil.copy2(week_txt, root / week_txt.name)
+
+    log(f"неделя {a:%d.%m}–{b:%d.%m}: {copied} скриншотов, {points} баллов")
+    for name, n in sorted(cats.items()):
+        log(f"  {name:48} {n:3} шт")
+    log(f"папка: {root}")
+    return {"folder": str(root), "files": copied, "points": points, "categories": dict(cats)}
+
+
 def dashboard(dest: Path = DEFAULT_DEST) -> dict:
     """Сводка для окна: прогресс повышения, недели, текущий период и рубежи сдачи."""
     rules = load_rules()
@@ -899,6 +1014,9 @@ if __name__ == "__main__":
         reclassify(dry_run="--dry" in sys.argv)
     elif "--swaps" in sys.argv:
         apply_substitutions()
+    elif "--week" in sys.argv:
+        i = sys.argv.index("--week")
+        week_folder(when=sys.argv[i + 1] if len(sys.argv) > i + 1 and not sys.argv[i + 1].startswith("--") else None)
     elif "--audit" in sys.argv:
         audit(fix="--fix" in sys.argv)
     elif "--submitted" in sys.argv:

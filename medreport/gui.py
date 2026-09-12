@@ -141,6 +141,11 @@ class App(tk.Tk):
         self.week_text = tk.Text(wk, height=6, font=("Consolas", 10), relief="flat",
                                  bg="#f6f6f6", state="disabled")
         self.week_text.pack(fill="x", padx=6, pady=6)
+        wrow = ttk.Frame(wk)
+        wrow.pack(fill="x", padx=6, pady=(0, 6))
+        self._btn(wrow, "Собрать папку недели", self._week_folder)
+        ttk.Label(wrow, text="все кадры недели в одной папке — её и выгружают",
+                  foreground="#555").pack(side="left", padx=4)
 
         per = ttk.LabelFrame(tab, text="Отчётные периоды — сданное не попадает в следующий отчёт")
         per.pack(fill="x", **pad)
@@ -314,6 +319,16 @@ class App(tk.Tk):
         else:
             messagebox.showinfo("Отчёт", "Отчёта ещё нет — сначала разбери скриншоты.")
 
+    def _week_folder(self):
+        """Собрать неделю в одну папку: сданное и несданное вместе, по категориям."""
+        dest = Path(self.dest_var.get())
+
+        def body():
+            res = pipeline.week_folder(dest, log=self._say)
+            self.q.put(("week_done", res))
+
+        self._work(body, after=self._refresh_dashboard)
+
     def _open_week(self):
         rdir = Path(self.dest_var.get()) / SERVICE_DIRS["report"]
         weeks = sorted(rdir.glob("неделя *.txt")) if rdir.exists() else []
@@ -407,6 +422,13 @@ class App(tk.Tk):
                 elif kind == "progress":
                     i, n = rest
                     self.progress.configure(maximum=max(1, n), value=i)
+                elif kind == "week_done":
+                    res = rest[0]
+                    if res["files"] and messagebox.askyesno(
+                            "Папка недели",
+                            f"Собрано {res['files']} скриншотов на {res['points']} баллов.\n"
+                            f"{res['folder']}\n\nОткрыть папку?"):
+                        os.startfile(res["folder"])  # noqa: S606
                 elif kind == "done":
                     self._set_busy(False)
                     fn = rest[0]
