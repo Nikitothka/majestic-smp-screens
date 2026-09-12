@@ -517,3 +517,51 @@ def write_all(dest: Path, items: list[tuple[dict, Decision]], plan: Plan, rules:
     (rdir / "отчёт.html").write_text("\n".join(parts), encoding="utf-8")
     out["html"] = rdir / "отчёт.html"
     return out
+
+
+def folder_totals_text(cats: Counter, detail: Counter, points: int, files: int,
+                       rules: Rules, title: str) -> str:
+    """Список «папка — сколько кадров — сколько баллов», чтобы заполнять форму не считая.
+
+    Доп. баллы расписаны построчно: в одной подпапке лежит работа с разной ценой
+    (вакцина из Склифа стоит 2 балла, из мед.отсека скорой — 3, и обе удваиваются),
+    а в форму идёт одна строка на всю папку — значит сумму надо показать сразу.
+    """
+    lunch_root = rules.raw["lunch_folder"]
+    names = {c["id"]: c["folder"] for c in rules.categories}
+    base = {c["id"]: c["points"] for c in rules.categories}
+    W = 52
+
+    def rows_of(folder: str) -> list[tuple[str, str, int, int]]:
+        out = []
+        for (fld, cat, price), n in detail.items():
+            if fld == folder:
+                out.append((cat, names.get(cat, cat or "—"), price, n))
+        return sorted(out, key=lambda r: (-r[3], r[1]))
+
+    L = [title, f"всего {files} скриншотов, {points} баллов",
+         f"собрано {datetime.now():%d.%m.%Y %H:%M}", "",
+         f"{'папка':<{W}}{'шт':>5}{'баллов':>9}"]
+    main = sorted(f for f in cats if not f.startswith(lunch_root))
+    for f in main:
+        pts = sum(price * n for _, _, price, n in rows_of(f))
+        L.append(f"{f:<{W}}{cats[f]:>5}{pts:>9}")
+
+    lunch = sorted(f for f in cats if f.startswith(lunch_root))
+    if lunch:
+        n_all = sum(cats[f] for f in lunch)
+        p_all = sum(price * n for f in lunch for _, _, price, n in rows_of(f))
+        L += ["", f"{lunch_root} — вся работа в обед, баллы ×2:",
+              f"{'  ВСЕГО ДОП. БАЛЛОВ':<{W}}{n_all:>5}{p_all:>9}", ""]
+        for f in lunch:
+            sub = f.split("/")[-1]
+            pts = sum(price * n for _, _, price, n in rows_of(f))
+            L.append(f"{'  ' + sub:<{W}}{cats[f]:>5}{pts:>9}")
+            for cat, name, price, n in rows_of(f):
+                was = base.get(cat)
+                how = f"{was} × 2 = {price} б." if was else f"{price} б."
+                L.append(f"{'      ' + name + ':  ' + how:<{W}}{n:>5}{price * n:>9}")
+        L.append("")
+        L.append("Один скриншот — одна строка формы. Работа в обед вписывается только")
+        L.append("в доп. баллы: в основной категории её нет, иначе отчёт вернут за дубль.")
+    return "\n".join(L) + "\n"

@@ -832,6 +832,58 @@ def _set_kind_in_journal(dest: Path, dst: Path, kind: str) -> None:
     journal.write_text(chr(10).join(out) + chr(10), encoding="utf-8")
 
 
+def write_folder_totals(dest: Path = DEFAULT_DEST, *, log=print) -> int:
+    """Положить в каждую папку периода список «папка — штук — баллов».
+
+    Форму отчёта заполняют по папкам, а сколько в папке баллов — приходится считать
+    руками, особенно в доп. баллах, где в одной подпапке лежит работа с разной ценой.
+    Файл обновляется после каждого разбора вместе с отчётом.
+    """
+    rules = load_rules()
+    journal = dest / SERVICE_DIRS["report"] / JOURNAL_NAME
+    if not journal.exists():
+        return 0
+    by_dst: dict[str, dict] = {}
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("dst"):
+            by_dst[rec["dst"]] = rec
+
+    per: dict[str, dict] = {}
+    for dst, rec in by_dst.items():
+        src = Path(dst)
+        if rec.get("kind") != "category" or not src.exists():
+            continue
+        try:
+            rel = src.parent.relative_to(dest).as_posix()
+        except ValueError:
+            continue
+        period = rec.get("period") or ""
+        folder = rel[len(period) + 1:] if period and rel.startswith(period + "/") else rel
+        d = per.setdefault(period, {"cats": Counter(), "detail": Counter(), "points": 0, "files": 0})
+        pts = rec.get("points") or 0
+        d["cats"][folder] += 1
+        d["detail"][(folder, _category_id_of(rec, rules) or "", pts)] += 1
+        d["points"] += pts
+        d["files"] += 1
+
+    written = 0
+    for period, d in per.items():
+        root = dest / period if period else dest
+        if not root.exists():
+            continue
+        title = f"ПАПКА «{period}»" if period else "ВСЁ РАЗОБРАННОЕ"
+        (root / "сколько вписывать в форму.txt").write_text(
+            report.folder_totals_text(d["cats"], d["detail"], d["points"], d["files"], rules, title),
+            encoding="utf-8")
+        written += 1
+        log(f"  {title}: {d['files']} шт, {d['points']} б.")
+    return written
+
+
 def rebuild_report(dest: Path = DEFAULT_DEST, *, log=print) -> None:
     """Пересобрать отчёты по журналу — после перепроверки или ручной перекладки файлов."""
     journal = dest / SERVICE_DIRS["report"] / JOURNAL_NAME
@@ -865,6 +917,7 @@ def rebuild_report(dest: Path = DEFAULT_DEST, *, log=print) -> None:
     plan = sorter.Plan(dest=str(dest), moves=moves)
     paths = report.write_all(dest, items, plan, rules)
     log("отчёты пересобраны: " + ", ".join(p.name for p in paths.values()))
+    write_folder_totals(dest, log=log)
 
 
 def week_bounds(when=None):
@@ -879,6 +932,16 @@ def week_bounds(when=None):
         d = when
     monday = d.fromordinal(d.toordinal() - d.weekday())
     return monday, monday.fromordinal(monday.toordinal() + 6)
+
+
+def _category_id_of(rec: dict, rules) -> str | None:
+    """Категория кадра. У старых записей её в журнале нет — там она в имени подпапки."""
+    cat_id = rec.get("orig_category_id") or rec.get("category_id")
+    if cat_id:
+        return cat_id
+    tail = (rec.get("folder") or "").replace("\\", "/").split("/")[-1]
+    cat = next((c for c in rules.categories if c["folder"] == tail), None)
+    return cat["id"] if cat else None
 
 
 def _weekly_folder_of(rec: dict, facts: dict, rules) -> str | None:
@@ -938,6 +1001,7 @@ def week_folder(dest: Path = DEFAULT_DEST, when=None, *, log=print) -> dict:
     if root.exists():
         shutil.rmtree(root)
     cats: Counter = Counter()
+    detail: Counter = Counter()          # (папка, категория, цена) → сколько кадров
     points = 0
     copied = 0
     for dst, rec in by_dst.items():
@@ -963,9 +1027,16 @@ def week_folder(dest: Path = DEFAULT_DEST, when=None, *, log=print) -> dict:
             os.link(src, out)
         except (OSError, NotImplementedError):
             shutil.copy2(src, out)
+        pts = rec.get("orig_points") or rec.get("points") or 0
         cats[folder] += 1
-        points += rec.get("orig_points") or rec.get("points") or 0
+        cat_id = _category_id_of(rec, rules)
+        detail[(folder, cat_id or "", pts)] += 1
+        points += pts
         copied += 1
+
+    (root / "сколько вписывать в форму.txt").write_text(
+        report.folder_totals_text(cats, detail, points, copied, rules,
+                                  f"НЕДЕЛЯ {a:%d.%m} — {b:%d.%m}"), encoding="utf-8")
 
     week_txt = dest / SERVICE_DIRS["report"] / f"неделя {a:%d.%m}-{b:%d.%m}.txt"
     if week_txt.exists():
@@ -974,6 +1045,7 @@ def week_folder(dest: Path = DEFAULT_DEST, when=None, *, log=print) -> dict:
     log(f"неделя {a:%d.%m}–{b:%d.%m}: {copied} скриншотов, {points} баллов")
     for name, n in sorted(cats.items()):
         log(f"  {name:48} {n:3} шт")
+    log("рядом положен список «сколько вписывать в форму.txt»")
     log(f"папка: {root}")
     return {"folder": str(root), "files": copied, "points": points, "categories": dict(cats)}
 
